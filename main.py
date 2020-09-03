@@ -45,7 +45,7 @@ class MyDataset(Dataset):
         elif type == 'validation':
             self.indices_path = os.path.join(self.base_path, r"validation.csv")
         else:
-            raise Exception
+            raise Exception("invalid type: {}".format(type))
         self.labels_path = os.path.join(self.base_path, r"labels.csv")
         self.image_dir_path = os.path.join(self.base_path, r"images")
 
@@ -175,7 +175,7 @@ class PlasticNet(nn.Module):
         assert(isinstance(x, PackedSequence))
         max_batch_size = x.batch_sizes[0].item()
         if state is None:
-            state = plasticnet_initial_state(self, max_batch_size, x.data.device)
+            state = self.plasticnet_initial_state(max_batch_size, x.data.device)
         offs = 0
         r = []
         for bs in x.batch_sizes:
@@ -195,12 +195,12 @@ class PlasticNet(nn.Module):
             offs += bs
             r.append(out)
         return PackedSequence(torch.cat(r, dim=0), x.batch_sizes), state
-
-def plasticnet_initial_state(plastic_net, batch_size, device):
-    h_size = plastic_net.hsize
-    h = Variable(torch.zeros(batch_size, h_size), requires_grad=False).to(device)
-    hebb   = Variable(torch.zeros(batch_size, h_size, h_size), requires_grad=False).to(device)
-    return h, hebb
+        
+    def plasticnet_initial_state(self, batch_size, device):
+        h_size = self.hsize
+        h = Variable(torch.zeros(batch_size, h_size), requires_grad=False).to(device)
+        hebb = Variable(torch.zeros(batch_size, h_size, h_size), requires_grad=False).to(device)
+        return h, hebb
 
 class Net(nn.Module):
     def __init__(self, mode='backpropamine'):
