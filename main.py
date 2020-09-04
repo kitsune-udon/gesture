@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils.rnn import PackedSequence, pack_sequence
-from torch.optim import AdamW
+from torch.optim import Adadelta
 from torch.optim.lr_scheduler import StepLR
 from torch.autograd import Variable
 from torch.utils.data import Dataset, DataLoader
@@ -35,8 +35,8 @@ class MyDataset(Dataset):
     
     def __getitem__(self, index):
         assert(isinstance(index, int))
-        index, label_str  = self.indices_df.loc[index, :].values.tolist()
-        return (self._get_video(index), self.labels_dict[label_str])
+        v_index, label_str = self.indices_df.loc[index, :].values.tolist()
+        return (self._get_video(v_index), self.labels_dict[label_str])
 
     def _set_path(self, base_path, type):
         self.base_path = base_path
@@ -89,6 +89,7 @@ class Validator():
             offs = 0
             for bs in y.batch_sizes:
                 output[0:bs] = y.data[offs:offs+bs]
+                offs += bs
             test_loss += F.nll_loss(output, label, reduction='sum').item()
             pred = output.argmax(dim=1, keepdim=True)
             correct += pred.eq(label.view_as(pred)).sum().item()
@@ -237,10 +238,10 @@ def main():
     #                    help='input batch size for testing (default: 1000)')
     parser.add_argument('--epochs', type=int, default=100, metavar='N',
                         help='number of epochs to train (default: 100)')
-    parser.add_argument('--num_workers', type=int, default=0, metavar='W',
+    parser.add_argument('--num-workers', type=int, default=0, metavar='W',
                         help='number of workers for data loading (default: 0)')
-    parser.add_argument('--lr', type=float, default=0.01, metavar='LR',
-                        help='learning rate (default: 0.01)')
+    parser.add_argument('--lr', type=float, default=1., metavar='LR',
+                        help='learning rate (default: 1.0)')
     parser.add_argument('--gamma', type=float, default=0.7, metavar='M',
                         help='Learning rate step gamma (default: 0.7)')
     parser.add_argument('--no-cuda', action='store_true', default=False,
@@ -249,7 +250,7 @@ def main():
                         help='quickly check a single pass')
     parser.add_argument('--seed', type=int, default=1, metavar='S',
                         help='random seed (default: 1)')
-    parser.add_argument('--dataset_dir', type=str, default=r"./dataset", metavar='D',
+    parser.add_argument('--dataset-dir', type=str, default=r"./dataset", metavar='D',
                         help='dataset place (default: ./dataset)')
     #parser.add_argument('--log-interval', type=int, default=10, metavar='N',
     #                    help='how many batches to wait before logging training status')
@@ -269,9 +270,9 @@ def main():
     train_data = MyDataset('train', args.dataset_dir)
     validation_data = MyDataset('validation', args.dataset_dir)
     train_dataloader = DataLoader(train_data, batch_size=args.batch_size, drop_last=True,
-        collate_fn=collate_fn, num_workers=args.num_workers)
+        shuffle=True, collate_fn=collate_fn, num_workers=args.num_workers)
     validation_dataloader = DataLoader(validation_data, batch_size=args.batch_size, drop_last=True,
-        collate_fn=collate_fn, num_workers=args.num_workers)
+        shuffle=True, collate_fn=collate_fn, num_workers=args.num_workers)
 
     resume = not args.no_resume
 
@@ -283,7 +284,7 @@ def main():
 
     mode = 'LSTM' if args.use_lstm else 'backpropamine'
     model = Net(mode=mode).to(device)
-    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
+    optimizer = Adadelta(model.parameters(), lr=args.lr)
     scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
 
     last_epoch, max_epoch = 0, args.epochs
