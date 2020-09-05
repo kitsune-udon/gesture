@@ -24,8 +24,7 @@ class MyDataset(Dataset):
         self.labels_dict = dict(zip(labels_df.loc[:,0].tolist(), range(n_classes)))
 
         self.transformer = transforms.Compose([
-            transforms.Resize(96),
-            transforms.CenterCrop(96),
+            transforms.Resize((128, 128)),
             transforms.ToTensor(),
             transforms.Normalize(mean = [0.5, 0.5, 0.5], std=[0.25, 0.25, 0.25])
         ])
@@ -157,20 +156,19 @@ class Trainer():
                 'last_epoch' : self.cur_epoch,
                 'model_state_dict' : model.state_dict(),
                 'optimizer_state_dict' : optimizer.state_dict(),
-                'scheduler_state_dict' : scheduler.state_dict() 
+                'scheduler_state_dict' : scheduler.state_dict()
             }, "checkpoint.pt")
             validator()
 
 class PlasticNet(nn.Module):
-    def __init__(self, isize, hsize, osize):
+    def __init__(self, isize, hsize):
         super(PlasticNet, self).__init__()
-        self.hsize, self.isize  = hsize, isize 
+        self.hsize, self.isize  = hsize, isize
         self.i2h = torch.nn.Linear(isize, hsize)
         self.w =  torch.nn.Parameter(.001 * torch.rand(hsize, hsize))
         self.alpha =  torch.nn.Parameter(.001 * torch.rand(hsize, hsize))
         self.h2mod = torch.nn.Linear(hsize, 1)
         self.modfanout = torch.nn.Linear(1, hsize)
-        self.h2o = torch.nn.Linear(hsize, osize)
 
     def forward(self, x, state=None):
         assert(isinstance(x, PackedSequence))
@@ -185,16 +183,15 @@ class PlasticNet(nn.Module):
             inputs = x.data[offs:offs+bs]
 
             h = torch.tanh(self.i2h(inputs) + h_pred.unsqueeze(1).bmm(self.w + torch.mul(self.alpha, hebb)).squeeze(1))
-            out = self.h2o(h)
             deltahebb = torch.bmm(h_pred.unsqueeze(2), h.unsqueeze(1))
             myeta = torch.tanh(self.h2mod(h)).unsqueeze(2)
-            myeta = self.modfanout(myeta) 
+            myeta = self.modfanout(myeta)
             clipval = 2.0
             hebb = torch.clamp(hebb + myeta * deltahebb, min=-clipval, max=clipval)
 
             state = (h, hebb)
+            r.append(h)
             offs += bs
-            r.append(out)
         return PackedSequence(torch.cat(r, dim=0), x.batch_sizes), state
         
     def plasticnet_initial_state(self, batch_size, device):
@@ -209,26 +206,22 @@ class Net(nn.Module):
         self.mode = mode
         self.mobilenet = torch.hub.load('pytorch/vision:v0.6.0', 'mobilenet_v2', pretrained=True)
         self.mobilenet.classifier = nn.Identity()
+        self.mobilenet = nn.DataParallel(self.mobilenet)
 
         if mode == 'backpropamine':
-            self.rnn = PlasticNet(1280, 1000, N_CLASSES)
+            self.rnn = PlasticNet(1280, 1000)
         elif mode == 'LSTM':
             self.rnn = nn.LSTM(1280, 1000)
-            self.fc = nn.Linear(1000, N_CLASSES)
         else:
             raise Exception("invalid mode: {}".format(self.mode))
+
+        self.fc = nn.Linear(1000, N_CLASSES)
 
     def forward(self, x):
         assert(isinstance(x, PackedSequence))
         x = PackedSequence(self.mobilenet(x.data), x.batch_sizes)
-        if self.mode == 'backpropamine':
-            x, _ = self.rnn(x)
-            return PackedSequence(F.log_softmax(x.data, dim=1), x.batch_sizes)
-        elif self.mode == 'LSTM':
-            x, _ = self.rnn(x)
-            return PackedSequence(F.log_softmax(self.fc(x.data), dim=1), x.batch_sizes)
-        else:
-            raise Exception("invalid mode: {}".format(self.mode))
+        x, _ = self.rnn(x)
+        return PackedSequence(F.log_softmax(self.fc(x.data), dim=1), x.batch_sizes)
 
 def main():
     parser = argparse.ArgumentParser(description='20bn-jester-v1 Gesture Classification with Backpropamine')
@@ -284,7 +277,7 @@ def main():
 
     mode = 'LSTM' if args.use_lstm else 'backpropamine'
     model = Net(mode=mode).to(device)
-    optimizer = Adadelta(model.parameters(), lr=args.lr)
+    optimizer = Adadelta(model.parameters(), lr=args.lr, weight_decay=1e-5)
     scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
 
     last_epoch, max_epoch = 0, args.epochs
