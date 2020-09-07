@@ -221,7 +221,7 @@ class PlasticLSTM(nn.Module):
         offs = 0
         r = []
         for bs in x.batch_sizes:
-            h_pred, c_pred, hebb = state
+            h_pred, c_pred, hebb = state[0][0:bs], state[1][0:bs], state[2][0:bs]
             fioj = self.x2fioj(x.data[offs:offs+bs]) + self.h2fioj(h_pred)
             f = torch.sigmoid(fioj[:,:hsize])
             i = torch.sigmoid(fioj[:,hsize:2*hsize])
