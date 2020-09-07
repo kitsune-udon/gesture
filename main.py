@@ -176,7 +176,7 @@ class PlasticNet(nn.Module):
         assert(isinstance(x, PackedSequence))
         max_batch_size = x.batch_sizes[0].item()
         if state is None:
-            state = self.plasticnet_initial_state(max_batch_size, x.data.device)
+            state = self.initial_state(max_batch_size, x.data.device)
         offs = 0
         r = []
         for bs in x.batch_sizes:
@@ -196,11 +196,56 @@ class PlasticNet(nn.Module):
             offs += bs
         return PackedSequence(torch.cat(r, dim=0), x.batch_sizes), state
         
-    def plasticnet_initial_state(self, batch_size, device):
+    def initial_state(self, batch_size, device):
         h_size = self.hsize
         h = Variable(torch.zeros(batch_size, h_size), requires_grad=False).to(device)
         hebb = Variable(torch.zeros(batch_size, h_size, h_size), requires_grad=False).to(device)
         return h, hebb
+
+class PlasticLSTM(nn.Module):
+    def __init__(self, isize, hsize):
+        super(PlasticLSTM, self).__init__()
+        self.isize, self.hsize = isize, hsize
+        self.x2fioj = nn.Linear(isize, 4 * hsize)
+        self.h2fioj = nn.Linear(hsize, 4 * hsize)
+        self.h2mod = nn.Linear(hsize, 1)
+        self.modfanout = nn.Linear(1, hsize)
+        self.alpha = nn.Parameter(0.0001 * torch.rand((hsize, hsize)))
+
+    def forward(self, x, state=None):
+        assert(isinstance(x, PackedSequence))
+        hsize = self.hsize
+        max_batch_size = x.batch_sizes[0].item()
+        if state is None:
+            state = self.initial_state(max_batch_size, x.data.device)
+        offs = 0
+        r = []
+        for bs in x.batch_sizes:
+            h_pred, c_pred, hebb = state
+            fioj = self.x2fioj(x.data[offs:offs+bs]) + self.h2fioj(h_pred)
+            f = torch.sigmoid(fioj[:,:hsize])
+            i = torch.sigmoid(fioj[:,hsize:2*hsize])
+            o = torch.sigmoid(fioj[:,2*hsize:3*hsize])
+            j = torch.tanh(fioj[:,3*hsize:] + h_pred.unsqueeze(1).bmm(torch.mul(self.alpha, hebb)).squeeze(1))
+            c = torch.mul(f, c_pred) + torch.mul(i, j)
+            h = torch.mul(o, torch.tanh(c))
+
+            delta_hebb = torch.bmm(h_pred.unsqueeze(2), j.unsqueeze(1))
+            myeta = torch.tanh(self.h2mod(c)).unsqueeze(2)
+            myeta = self.modfanout(myeta).squeeze().unsqueeze(1)
+            clipval = 2.0
+            hebb = torch.clamp(hebb + myeta * delta_hebb, min=-clipval, max=clipval)
+            state = (h, c, hebb)
+            r.append(h)
+            offs += bs
+        return PackedSequence(torch.cat(r, dim=0), x.batch_sizes), state
+
+    def initial_state(self, batch_size, device):
+        hsize = self.hsize
+        h = Variable(torch.zeros(batch_size, hsize), requires_grad=False).to(device)
+        c = Variable(torch.zeros(batch_size, hsize), requires_grad=False).to(device)
+        hebb = Variable(torch.zeros(batch_size, hsize, hsize), requires_grad=False).to(device)
+        return h, c, hebb
 
 class Net(nn.Module):
     def __init__(self, mode='backpropamine'):
@@ -211,7 +256,7 @@ class Net(nn.Module):
         self.mobilenet = nn.DataParallel(self.mobilenet)
 
         if mode == 'backpropamine':
-            self.rnn = PlasticNet(1280, 1000)
+            self.rnn = PlasticLSTM(1280, 1000)
         elif mode == 'LSTM':
             self.rnn = nn.LSTM(1280, 1000)
         else:
