@@ -206,8 +206,10 @@ class PlasticLSTM(nn.Module):
     def __init__(self, isize, hsize):
         super(PlasticLSTM, self).__init__()
         self.isize, self.hsize = isize, hsize
-        self.x2fioj = nn.Linear(isize, 4 * hsize)
-        self.h2fioj = nn.Linear(hsize, 4 * hsize)
+        self.x2fio = nn.Linear(isize, 3 * hsize)
+        self.h2fio = nn.Linear(hsize, 3 * hsize)
+        self.x2j = nn.Linear(isize, hsize)
+        self.w = nn.Parameter(0.1 * torch.rand((hsize, hsize)))
         self.h2mod = nn.Linear(hsize, 1)
         self.modfanout = nn.Linear(1, hsize)
         self.alpha = nn.Parameter(0.0001 * torch.rand((hsize, hsize)))
@@ -222,16 +224,16 @@ class PlasticLSTM(nn.Module):
         r = []
         for bs in x.batch_sizes:
             h_pred, c_pred, hebb = state[0][0:bs], state[1][0:bs], state[2][0:bs]
-            fioj = self.x2fioj(x.data[offs:offs+bs]) + self.h2fioj(h_pred)
-            f = torch.sigmoid(fioj[:,:hsize])
-            i = torch.sigmoid(fioj[:,hsize:2*hsize])
-            o = torch.sigmoid(fioj[:,2*hsize:3*hsize])
-            j = torch.tanh(fioj[:,3*hsize:] + h_pred.unsqueeze(1).bmm(torch.mul(self.alpha, hebb)).squeeze(1))
+            fio = self.x2fio(x.data[offs:offs+bs]) + self.h2fio(h_pred)
+            f = torch.sigmoid(fio[:,:hsize])
+            i = torch.sigmoid(fio[:,hsize:2*hsize])
+            o = torch.sigmoid(fio[:,2*hsize:])
+            j = torch.tanh(self.x2j(x.data[offs:offs+bs]) + h_pred.unsqueeze(1).bmm(self.w + torch.mul(self.alpha, hebb)).squeeze(1))
             c = torch.mul(f, c_pred) + torch.mul(i, j)
             h = torch.mul(o, torch.tanh(c))
 
             delta_hebb = torch.bmm(h_pred.unsqueeze(2), j.unsqueeze(1))
-            myeta = torch.tanh(self.h2mod(c)).unsqueeze(2)
+            myeta = torch.tanh(self.h2mod(h)).unsqueeze(2)
             myeta = self.modfanout(myeta).squeeze().unsqueeze(1)
             clipval = 2.0
             hebb = torch.clamp(hebb + myeta * delta_hebb, min=-clipval, max=clipval)
@@ -247,6 +249,21 @@ class PlasticLSTM(nn.Module):
         hebb = Variable(torch.zeros(batch_size, hsize, hsize), requires_grad=False).to(device)
         return h, c, hebb
 
+def solve(i, h):
+    def f(x):
+        plastic_param = 5 * x * x + x * (4 * i + 10) + 1
+        lstm_param = 4 * h * (i + h + 2)
+        return plastic_param - lstm_param
+    def d(x):
+        return 10 * x + (4 * i + 10)
+    x = float(h)
+    for _ in range(100):
+        x_ = x - f(x) / d(x)
+        if (x - x_) * (x - x_) < 0.001:
+          break
+        x = x_
+    return int(x)
+
 class Net(nn.Module):
     def __init__(self, mode='backpropamine'):
         super(Net, self).__init__()
@@ -254,15 +271,17 @@ class Net(nn.Module):
         self.mobilenet = torch.hub.load('pytorch/vision:v0.6.0', 'mobilenet_v2', pretrained=True)
         self.mobilenet.classifier = nn.Identity()
         self.mobilenet = nn.DataParallel(self.mobilenet)
+        isize, lstm_hsize = 1280, 1000
 
         if mode == 'backpropamine':
-            self.rnn = PlasticLSTM(1280, 1000)
+            hsize = solve(isize, lstm_hsize)
+            self.rnn = PlasticLSTM(isize, hsize)
         elif mode == 'LSTM':
-            self.rnn = nn.LSTM(1280, 1000)
+            self.rnn = nn.LSTM(isize, lstm_hsize)
         else:
             raise Exception("invalid mode: {}".format(self.mode))
 
-        self.fc = nn.Linear(1000, N_CLASSES)
+        self.fc = nn.Linear(hsize, N_CLASSES)
 
     def forward(self, x):
         assert(isinstance(x, PackedSequence))
