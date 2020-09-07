@@ -14,13 +14,15 @@ import pandas as pd, os, argparse
 N_CLASSES = 27
 
 class MyDataset(Dataset):
-    def __init__(self, type, base_path):
+    def __init__(self, type, base_path, frame_step=1):
         super(MyDataset, self).__init__()
         self._set_path(base_path, type)
         self.indices_df = pd.read_csv(self.indices_path, sep=';', header=None)
         labels_df = pd.read_csv(self.labels_path, sep=';', header=None)
         n_classes = len(labels_df)
         assert(n_classes == N_CLASSES)
+        assert(frame_step > 0)
+        self.frame_step = frame_step
         self.labels_dict = dict(zip(labels_df.loc[:,0].tolist(), range(n_classes)))
 
         self.transformer = transforms.Compose([
@@ -52,7 +54,7 @@ class MyDataset(Dataset):
         dir = os.path.join(self.image_dir_path, str(index))
         files = os.listdir(dir)
         r = sorted([os.path.join(dir, f) for f in files if os.path.isfile(os.path.join(dir, f))])
-        return r
+        return r[::self.frame_step]
     
     def _get_video(self, index):
         v = [self.transformer(Image.open(path)) for path in self._get_image_path(index)]
@@ -235,8 +237,8 @@ def main():
                         help='number of workers for data loading (default: 0)')
     parser.add_argument('--lr', type=float, default=1., metavar='LR',
                         help='learning rate (default: 1.0)')
-    parser.add_argument('--gamma', type=float, default=0.7, metavar='M',
-                        help='Learning rate step gamma (default: 0.7)')
+    parser.add_argument('--gamma', type=float, default=0.9, metavar='M',
+                        help='Learning rate step gamma (default: 0.9)')
     parser.add_argument('--no-cuda', action='store_true', default=False,
                         help='disables CUDA training')
     parser.add_argument('--dry-run', action='store_true', default=False,
@@ -253,6 +255,8 @@ def main():
                         help='switch to disables resume')
     parser.add_argument('--use-lstm', action='store_true', default=False,
                         help='switch to use LSTM module instead of backpropamine')
+    parser.add_argument('--frame-step', type=int, default=2, metavar='FS',
+                        help='step of video frames extraction (default: 2)')
     args = parser.parse_args()
 
     use_cuda = not args.no_cuda and torch.cuda.is_available()
@@ -260,8 +264,8 @@ def main():
 
     torch.manual_seed(args.seed)
 
-    train_data = MyDataset('train', args.dataset_dir)
-    validation_data = MyDataset('validation', args.dataset_dir)
+    train_data = MyDataset('train', args.dataset_dir, frame_step=args.frame_step)
+    validation_data = MyDataset('validation', args.dataset_dir, frame_step=args.frame_step)
     train_dataloader = DataLoader(train_data, batch_size=args.batch_size, drop_last=True,
         shuffle=True, collate_fn=collate_fn, num_workers=args.num_workers)
     validation_dataloader = DataLoader(validation_data, batch_size=args.batch_size, drop_last=True,
