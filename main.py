@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils.rnn import PackedSequence, pack_sequence
-from torch.optim import Adadelta
+from torch.optim import AdamW
 from torch.optim.lr_scheduler import StepLR
 from torch.autograd import Variable
 from torch.utils.data import Dataset, DataLoader
@@ -79,30 +79,31 @@ class Validator():
         test_loss, correct, total, iter = 0, 0, 0, 0
 
         model.eval()
-        for packed, label in dataloader:
-            if iter > 0 and self.dry_run:
-                break
-            label = label.to(device)
-            max_batch_size = packed.batch_sizes[0].item()
-            output_shape = [max_batch_size, N_CLASSES]
-            output = torch.zeros(output_shape).to(device) # output placeholder
-            y = model(packed.to(device))
-            offs = 0
-            for bs in y.batch_sizes:
-                output[0:bs] = y.data[offs:offs+bs]
-                offs += bs
-            test_loss += F.nll_loss(output, label, reduction='sum').item()
-            pred = output.argmax(dim=1, keepdim=True)
-            correct += pred.eq(label.view_as(pred)).sum().item()
-            total += max_batch_size
-            iter += 1
-            if iter % 10 == 0:
-                print("validation processed_data:{}".format(max_batch_size * iter))
+        with torch.no_grad():
+          for packed, label in dataloader:
+              if iter > 0 and self.dry_run:
+                  break
+              label = label.to(device)
+              max_batch_size = packed.batch_sizes[0].item()
+              output_shape = [max_batch_size, N_CLASSES]
+              output = torch.zeros(output_shape).to(device) # output placeholder
+              y = model(packed.to(device))
+              offs = 0
+              for bs in y.batch_sizes:
+                  output[0:bs] = y.data[offs:offs+bs]
+                  offs += bs
+              test_loss += F.nll_loss(output, label, reduction='sum').item()
+              pred = output.argmax(dim=1, keepdim=True)
+              correct += pred.eq(label.view_as(pred)).sum().item()
+              total += max_batch_size
+              iter += 1
+              if iter % 10 == 0:
+                  print("validation processed_data:{}".format(max_batch_size * iter))
 
-        accuracy = correct / total
-        test_loss /= total
-        print("validation average loss:{:.4f}, accuracy:{:.4f} ({}/{})".format(
-            test_loss, accuracy * 100, correct, total))
+          accuracy = correct / total
+          test_loss /= total
+          print("validation average loss:{:.4f}, accuracy:{:.4f} ({}/{})".format(
+              test_loss, accuracy * 100, correct, total))
 
 class Trainer():
     def __init__(self, model, optimizer, dataloader, scheduler,
@@ -209,7 +210,7 @@ class PlasticLSTM(nn.Module):
         self.x2fio = nn.Linear(isize, 3 * hsize)
         self.h2fio = nn.Linear(hsize, 3 * hsize)
         self.x2j = nn.Linear(isize, hsize)
-        self.w = nn.Parameter(0.1 * torch.rand((hsize, hsize)))
+        self.w = nn.Parameter(0.0001 * torch.rand((hsize, hsize)))
         self.h2mod = nn.Linear(hsize, 1)
         self.modfanout = nn.Linear(1, hsize)
         self.alpha = nn.Parameter(0.0001 * torch.rand((hsize, hsize)))
@@ -271,12 +272,13 @@ class Net(nn.Module):
         self.mobilenet = torch.hub.load('pytorch/vision:v0.6.0', 'mobilenet_v2', pretrained=True)
         self.mobilenet.classifier = nn.Identity()
         self.mobilenet = nn.DataParallel(self.mobilenet)
-        isize, lstm_hsize = 1280, 1000
+        isize, lstm_hsize = 1280, 1280
 
         if mode == 'backpropamine':
             hsize = solve(isize, lstm_hsize)
             self.rnn = PlasticLSTM(isize, hsize)
         elif mode == 'LSTM':
+            hsize = lstm_hsize
             self.rnn = nn.LSTM(isize, lstm_hsize)
         else:
             raise Exception("invalid mode: {}".format(self.mode))
@@ -299,10 +301,10 @@ def main():
                         help='number of epochs to train (default: 100)')
     parser.add_argument('--num-workers', type=int, default=0, metavar='W',
                         help='number of workers for data loading (default: 0)')
-    parser.add_argument('--lr', type=float, default=1., metavar='LR',
-                        help='learning rate (default: 1.0)')
-    parser.add_argument('--gamma', type=float, default=0.9, metavar='M',
-                        help='Learning rate step gamma (default: 0.9)')
+    parser.add_argument('--lr', type=float, default=0.0001, metavar='LR',
+                        help='learning rate (default: 0.0001)')
+    parser.add_argument('--gamma', type=float, default=0.7, metavar='M',
+                        help='Learning rate step gamma (default: 0.7)')
     parser.add_argument('--no-cuda', action='store_true', default=False,
                         help='disables CUDA training')
     parser.add_argument('--dry-run', action='store_true', default=False,
@@ -345,7 +347,7 @@ def main():
 
     mode = 'LSTM' if args.use_lstm else 'backpropamine'
     model = Net(mode=mode).to(device)
-    optimizer = Adadelta(model.parameters(), lr=args.lr, weight_decay=1e-5)
+    optimizer = AdamW(model.parameters(), lr=args.lr)
     scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
 
     last_epoch, max_epoch = 0, args.epochs
